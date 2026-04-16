@@ -1,10 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { exec } from 'child_process';
-import { promisify } from 'util';
 import ytdl from '@distube/ytdl-core';
 import { extractYoutubeVideoId } from '@/lib/youtube';
-
-const execAsync = promisify(exec);
+import { getYoutubeDlExec } from '@/lib/youtube-dl-exec';
 
 /** There is no legitimate third-party “free unlimited” HTTP API for raw YouTube streams; we use fast in-process extraction + cache, then yt-dlp as fallback. */
 
@@ -41,43 +38,7 @@ function setCached(key: string, payload: BeatPayload) {
   cache.set(key, { payload, expires: Date.now() + CACHE_TTL_MS });
 }
 
-async function tryYtdlCore(url: string): Promise<BeatPayload | null> {
-  try {
-    const info = await ytdl.getInfo(url);
-    let format;
-    try {
-      format = ytdl.chooseFormat(info.formats, {
-        filter: (f) => Boolean(f.hasAudio && !f.hasVideo && f.mimeType?.includes('mp4')),
-        quality: 'highestaudio',
-      });
-    } catch {
-      format = ytdl.chooseFormat(info.formats, {
-        filter: 'audioonly',
-        quality: 'highestaudio',
-      });
-    }
-    if (!format?.url) return null;
-    const title = info.videoDetails?.title || 'Unknown Title';
-    const lengthSeconds = Number(info.videoDetails?.lengthSeconds) || 0;
-    return { streamUrl: format.url, title, lengthSeconds };
-  } catch {
-    return null;
-  }
-}
-
-async function tryYtDlp(url: string): Promise<BeatPayload | null> {
-  const cwd = process.cwd();
-  const format =
-    'bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio[protocol^=https]/bestaudio/best';
-  const command = `./node_modules/youtube-dl-exec/bin/yt-dlp "${url}" --dump-single-json --no-warnings --no-check-certificate --referer "https://www.youtube.com/" --format "${format}"`;
-
-  const { stdout } = await execAsync(command, {
-    cwd,
-    maxBuffer: 10 * 1024 * 1024,
-    timeout: 45_000,
-  });
-  const output = JSON.parse(stdout) as Record<string, unknown>;
-
+function payloadFromDump(output: Record<string, unknown>): BeatPayload | null {
   const streamUrl =
     (output.url as string | undefined) ||
     (Array.isArray(output.requested_downloads) &&
@@ -96,6 +57,56 @@ async function tryYtDlp(url: string): Promise<BeatPayload | null> {
     0;
 
   return { streamUrl, title, lengthSeconds };
+}
+
+async function tryYtdlCore(url: string): Promise<BeatPayload | null> {
+  try {
+    const info = await ytdl.getInfo(url, {
+      // Hosted / datacenter IPs often fail with the default WEB client; rotate clients.
+      playerClients: ['WEB_EMBEDDED', 'IOS', 'ANDROID', 'WEB'],
+    });
+    let format;
+    try {
+      format = ytdl.chooseFormat(info.formats, {
+        filter: (f) => Boolean(f.hasAudio && !f.hasVideo && f.mimeType?.includes('mp4')),
+        quality: 'highestaudio',
+      });
+    } catch {
+      format = ytdl.chooseFormat(info.formats, {
+        filter: 'audioonly',
+        quality: 'highestaudio',
+      });
+    }
+    if (!format?.url) return null;
+    const title = info.videoDetails?.title || 'Unknown Title';
+    const lengthSeconds = Number(info.videoDetails?.lengthSeconds) || 0;
+    return { streamUrl: format.url, title, lengthSeconds };
+  } catch (e) {
+    console.warn('[youtube] ytdl-core failed:', e instanceof Error ? e.message : e);
+    return null;
+  }
+}
+
+async function tryYtDlp(url: string): Promise<BeatPayload | null> {
+  const format =
+    'bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio[protocol^=https]/bestaudio/best';
+  try {
+    const output = (await getYoutubeDlExec()(
+      url,
+      {
+        dumpSingleJson: true,
+        noWarnings: true,
+        noCheckCertificates: true,
+        referer: 'https://www.youtube.com/',
+        format,
+      },
+      { timeout: 45_000 },
+    )) as Record<string, unknown>;
+    return payloadFromDump(output);
+  } catch (e) {
+    console.warn('[youtube] yt-dlp failed:', e instanceof Error ? e.message : e);
+    return null;
+  }
 }
 
 export async function GET(req: NextRequest) {
