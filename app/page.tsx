@@ -112,49 +112,121 @@ export default function ImpactApp() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const [songsGroupBy, setSongsGroupBy] = useState<'album' | 'goal' | 'genre'>('album');
+  const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
-    try {
-      const savedProjects = localStorage.getItem(LS_PROJECTS);
-      if (savedProjects) {
-        const parsed = JSON.parse(savedProjects) as Record<string, unknown>[];
-        setProjects(parsed.map((p) => migrateProject(p)));
+    let cancelled = false;
+
+    const loadFromLocal = () => {
+      try {
+        const savedProjects = localStorage.getItem(LS_PROJECTS);
+        if (savedProjects) {
+          const parsed = JSON.parse(savedProjects) as Record<string, unknown>[];
+          setProjects(parsed.map((p) => migrateProject(p)));
+        }
+        let loadedThemes: Theme[] | null = null;
+        const t = localStorage.getItem(LS_THEMES);
+        if (t) loadedThemes = JSON.parse(t) as Theme[];
+        else {
+          const legacy = localStorage.getItem(LS_CATEGORIES_LEGACY);
+          if (legacy) loadedThemes = JSON.parse(legacy) as Theme[];
+        }
+        if (loadedThemes?.length) setThemes(loadedThemes);
+        const savedAlbums = localStorage.getItem(LS_ALBUMS);
+        if (savedAlbums) setAlbums(JSON.parse(savedAlbums) as Album[]);
+        const savedGoals = localStorage.getItem(LS_GOALS);
+        if (savedGoals) {
+          const g = JSON.parse(savedGoals) as GrammyGoal[];
+          if (g.length) setGrammyGoals(g);
+        }
+      } catch {
+        /* ignore */
       }
-      let loadedThemes: Theme[] | null = null;
-      const t = localStorage.getItem(LS_THEMES);
-      if (t) loadedThemes = JSON.parse(t) as Theme[];
-      else {
-        const legacy = localStorage.getItem(LS_CATEGORIES_LEGACY);
-        if (legacy) loadedThemes = JSON.parse(legacy) as Theme[];
+    };
+
+    (async () => {
+      try {
+        const res = await fetch('/api/impact-state');
+        if (res.ok) {
+          const data = (await res.json()) as {
+            ok?: boolean;
+            row?: {
+              projects?: unknown;
+              themes?: unknown;
+              albums?: unknown;
+              grammy_goals?: unknown;
+            } | null;
+          };
+          if (data.ok && data.row) {
+            const row = data.row;
+            if (Array.isArray(row.projects)) {
+              setProjects(row.projects.map((p) => migrateProject(p as Record<string, unknown>)));
+            }
+            if (Array.isArray(row.themes) && row.themes.length > 0) {
+              setThemes(row.themes as Theme[]);
+            }
+            if (Array.isArray(row.albums)) {
+              setAlbums(row.albums as Album[]);
+            }
+            if (Array.isArray(row.grammy_goals)) {
+              if (row.grammy_goals.length > 0) setGrammyGoals(row.grammy_goals as GrammyGoal[]);
+            }
+            if (!cancelled) {
+              setHydrated(true);
+              return;
+            }
+          }
+        }
+      } catch {
+        /* fall through to local */
       }
-      if (loadedThemes?.length) setThemes(loadedThemes);
-      const savedAlbums = localStorage.getItem(LS_ALBUMS);
-      if (savedAlbums) setAlbums(JSON.parse(savedAlbums) as Album[]);
-      const savedGoals = localStorage.getItem(LS_GOALS);
-      if (savedGoals) {
-        const g = JSON.parse(savedGoals) as GrammyGoal[];
-        if (g.length) setGrammyGoals(g);
+      if (!cancelled) {
+        loadFromLocal();
+        setHydrated(true);
       }
-    } catch {
-      /* ignore */
-    }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
+    if (!hydrated) return;
     localStorage.setItem(LS_PROJECTS, JSON.stringify(projects));
-  }, [projects]);
+  }, [projects, hydrated]);
 
   useEffect(() => {
+    if (!hydrated) return;
     localStorage.setItem(LS_THEMES, JSON.stringify(themes));
-  }, [themes]);
+  }, [themes, hydrated]);
 
   useEffect(() => {
+    if (!hydrated) return;
     localStorage.setItem(LS_ALBUMS, JSON.stringify(albums));
-  }, [albums]);
+  }, [albums, hydrated]);
 
   useEffect(() => {
+    if (!hydrated) return;
     localStorage.setItem(LS_GOALS, JSON.stringify(grammyGoals));
-  }, [grammyGoals]);
+  }, [grammyGoals, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    const t = setTimeout(() => {
+      fetch('/api/impact-state', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projects,
+          themes,
+          albums,
+          grammy_goals: grammyGoals,
+        }),
+      }).catch(() => {});
+    }, 900);
+    return () => clearTimeout(t);
+  }, [projects, themes, albums, grammyGoals, hydrated]);
 
   useEffect(() => {
     if (currentProject && currentProject.youtubeUrl) {

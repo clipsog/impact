@@ -43,3 +43,6 @@ next-env.d.ts
 # local dev daemon (npm run dev:bg)
 .impact-dev.pid
 .impact-dev.log
+
+# local browser export (may contain personal lyrics)
+scripts/impact-local-export.json
