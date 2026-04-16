@@ -848,7 +848,7 @@ export default function ImpactApp() {
             {Array.from(songsGrouped.entries()).map(([groupName, projs]) => (
               <div key={groupName} style={{ marginBottom: '2.5rem' }}>
                 <h3 style={{ marginBottom: '1rem', fontSize: '1.15rem' }}>{groupName}</h3>
-                <div className="grid-cards" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))' }}>
+                <div className="grid-cards songs-project-grid">
                   {projs.map((proj) => (
                     <div key={proj.id} className="glass category-bar-card">
                       <div style={{ fontWeight: 700, marginBottom: '0.75rem' }}>{proj.title}</div>
@@ -979,13 +979,13 @@ export default function ImpactApp() {
               <ArrowLeft size={16} /> Back
             </button>
 
-            <div className="glass" style={{ padding: '2rem' }}>
+            <div className="glass project-shell">
               <input
                 type="text"
                 value={currentProject.title}
                 onChange={(e) => updateCurrentProject({ title: e.target.value })}
+                className="project-title-input"
                 style={{
-                  fontSize: '2rem',
                   fontWeight: 800,
                   background: 'transparent',
                   border: 'none',
@@ -1243,16 +1243,7 @@ export default function ImpactApp() {
                       </div>
                     </div>
                     {expanded && (
-                      <div
-                        className="glass"
-                        style={{
-                          margin: '0 0 1rem 2.25rem',
-                          padding: '1rem',
-                          display: 'grid',
-                          gridTemplateColumns: '1fr 1fr',
-                          gap: '0.75rem',
-                        }}
-                      >
+                      <div className="glass bar-expand-panel">
                         <div style={{ gridColumn: '1 / -1' }}>
                           <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Theme</label>
                           <select
