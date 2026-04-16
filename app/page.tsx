@@ -31,6 +31,7 @@ import {
   DEFAULT_GRAMMY_GOALS,
   type GrammyGoal,
 } from '@/lib/impact-data';
+import { extractYoutubeVideoId } from '@/lib/youtube';
 
 type Bar = {
   id: string;
@@ -109,10 +110,18 @@ export default function ImpactApp() {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [playerUrl, setPlayerUrl] = useState<string | null>(null);
+  const [playerLoading, setPlayerLoading] = useState(false);
+  const [useEmbedPlayer, setUseEmbedPlayer] = useState(false);
+  const [beatStreamError, setBeatStreamError] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const [songsGroupBy, setSongsGroupBy] = useState<'album' | 'goal' | 'genre'>('album');
   const [hydrated, setHydrated] = useState(false);
+
+  const beatYoutubeId = useMemo(() => {
+    const raw = currentProject?.youtubeUrl?.trim();
+    return raw ? extractYoutubeVideoId(raw) : null;
+  }, [currentProject?.youtubeUrl]);
 
   useEffect(() => {
     let cancelled = false;
@@ -229,25 +238,60 @@ export default function ImpactApp() {
   }, [projects, themes, albums, grammyGoals, hydrated]);
 
   useEffect(() => {
-    if (currentProject && currentProject.youtubeUrl) {
-      if (!playerUrl || !playerUrl.includes(currentProject.youtubeUrl)) {
-        fetch(`/api/youtube?url=${encodeURIComponent(currentProject.youtubeUrl)}`)
-          .then((res) => res.json())
-          .then((data) => {
-            if (data.streamUrl) setPlayerUrl(data.streamUrl);
-          })
-          .catch((err) => console.error(err));
-      }
-    } else {
+    const url = currentProject?.youtubeUrl?.trim();
+    if (!currentProject || !url) {
       setPlayerUrl(null);
+      setPlayerLoading(false);
+      setUseEmbedPlayer(false);
+      setBeatStreamError(false);
+      setIsPlaying(false);
+      return;
     }
+
+    const ac = new AbortController();
+    setPlayerLoading(true);
+    setUseEmbedPlayer(false);
+    setBeatStreamError(false);
+    setPlayerUrl(null);
+    setIsPlaying(false);
+
+    fetch(`/api/youtube?url=${encodeURIComponent(url)}`, { signal: ac.signal })
+      .then(async (res) => {
+        const data = (await res.json()) as { streamUrl?: string; error?: string };
+        if (!res.ok || !data.streamUrl) {
+          throw new Error(data.error || 'no_stream');
+        }
+        setPlayerUrl(data.streamUrl);
+      })
+      .catch(() => {
+        if (ac.signal.aborted) return;
+        setPlayerUrl(null);
+        if (extractYoutubeVideoId(url)) setUseEmbedPlayer(true);
+        else setBeatStreamError(true);
+      })
+      .finally(() => {
+        if (!ac.signal.aborted) setPlayerLoading(false);
+      });
+
+    return () => ac.abort();
   }, [currentProject?.youtubeUrl]);
 
-  const togglePlay = () => {
-    if (audioRef.current) {
-      if (isPlaying) audioRef.current.pause();
-      else audioRef.current.play();
-      setIsPlaying(!isPlaying);
+  const togglePlay = async () => {
+    const el = audioRef.current;
+    if (!el) return;
+    try {
+      if (isPlaying) {
+        el.pause();
+        setIsPlaying(false);
+      } else {
+        await el.play();
+        setIsPlaying(true);
+      }
+    } catch {
+      setIsPlaying(false);
+      if (beatYoutubeId) {
+        setUseEmbedPlayer(true);
+      }
     }
   };
 
@@ -1062,30 +1106,69 @@ export default function ImpactApp() {
                       <Music2 size={20} color="var(--accent-color)" />
                       <span style={{ fontWeight: 600 }}>Beat Player</span>
                     </div>
-                    {playerUrl && <span className="tag" style={{ background: 'var(--success)' }}>Ready</span>}
+                    {playerLoading && (
+                      <span className="tag" style={{ background: 'rgba(148, 163, 184, 0.35)' }}>
+                        Loading…
+                      </span>
+                    )}
+                    {!playerLoading && useEmbedPlayer && beatYoutubeId && (
+                      <span className="tag" style={{ background: 'var(--success)' }}>YouTube</span>
+                    )}
+                    {!playerLoading && !useEmbedPlayer && playerUrl && (
+                      <span className="tag" style={{ background: 'var(--success)' }}>Ready</span>
+                    )}
                   </div>
-                  {playerUrl && (
+                  {beatStreamError && (
+                    <p style={{ fontSize: '0.85rem', color: 'var(--danger)', marginBottom: '0.75rem' }}>
+                      Could not load a stream for this link. Use a normal YouTube watch URL (or youtu.be) and try again.
+                    </p>
+                  )}
+                  {useEmbedPlayer && beatYoutubeId && (
+                    <div className="youtube-embed-wrap">
+                      <iframe
+                        title="YouTube beat"
+                        src={`https://www.youtube.com/embed/${beatYoutubeId}?playsinline=1&rel=0`}
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                        allowFullScreen
+                      />
+                      <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
+                        Playback here uses YouTube&rsquo;s player (tap play inside the frame). Built-in loop controls only affect the separate audio stream when your browser can play it.
+                      </p>
+                    </div>
+                  )}
+                  {playerUrl && !useEmbedPlayer && (
                     <audio
                       ref={audioRef}
                       src={playerUrl}
+                      playsInline
+                      preload="metadata"
                       onTimeUpdate={handleTimeUpdate}
                       onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
                       onEnded={() => setIsPlaying(false)}
+                      onError={() => {
+                        setIsPlaying(false);
+                        if (beatYoutubeId) setUseEmbedPlayer(true);
+                      }}
                     />
                   )}
                   <div className="player-controls">
-                    <button type="button" className="btn btn-icon-only" onClick={togglePlay} disabled={!playerUrl}>
+                    <button
+                      type="button"
+                      className="btn btn-icon-only"
+                      onClick={togglePlay}
+                      disabled={!playerUrl || useEmbedPlayer || playerLoading}
+                    >
                       {isPlaying ? <Pause size={20} /> : <Play size={20} />}
                     </button>
                     <div className="progress-container">
                       <div
                         className="progress-bar"
-                        onClick={(e) => {
-                          if (audioRef.current && duration) {
-                            const rect = e.currentTarget.getBoundingClientRect();
-                            const pos = (e.clientX - rect.left) / rect.width;
-                            audioRef.current.currentTime = pos * duration;
-                          }
+                        onPointerDown={(e) => {
+                          if (!audioRef.current || !duration || useEmbedPlayer) return;
+                          const el = e.currentTarget;
+                          const rect = el.getBoundingClientRect();
+                          const pos = (e.clientX - rect.left) / rect.width;
+                          audioRef.current.currentTime = Math.min(1, Math.max(0, pos)) * duration;
                         }}
                         role="presentation"
                       >

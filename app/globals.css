@@ -564,3 +564,18 @@ input:focus, textarea:focus {
     grid-template-columns: 1fr;
   }
 }
+
+.youtube-embed-wrap {
+  width: 100%;
+  margin-bottom: 0.75rem;
+}
+
+.youtube-embed-wrap iframe {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  min-height: 180px;
+  border: 0;
+  border-radius: 12px;
+  background: #000;
+}

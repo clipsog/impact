@@ -13,7 +13,10 @@ export async function GET(req: NextRequest) {
 
   try {
     const cwd = process.cwd();
-    const command = `./node_modules/youtube-dl-exec/bin/yt-dlp "${url}" --dump-single-json --no-warnings --no-check-certificate --prefer-free-formats --referer "https://www.youtube.com/" --format "bestaudio/best"`;
+    // Prefer m4a/AAC (iOS Safari often cannot play WebM/Opus in <audio>). HTTPS-only when possible.
+    const format =
+      'bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio[protocol^=https]/bestaudio/best';
+    const command = `./node_modules/youtube-dl-exec/bin/yt-dlp "${url}" --dump-single-json --no-warnings --no-check-certificate --referer "https://www.youtube.com/" --format "${format}"`;
     
     const { stdout } = await execAsync(command, { cwd, maxBuffer: 1024 * 1024 * 10 });
     const output = JSON.parse(stdout);
