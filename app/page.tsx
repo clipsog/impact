@@ -57,6 +57,7 @@ type Bar = {
   id: string;
   text: string;
   themeId: string | null;
+  sectionId: string | null;
   characterFamilyId: string | null;
   characterTag: string | null;
   artDevice: string | null;
@@ -64,6 +65,7 @@ type Bar = {
 };
 
 type Album = { id: string; name: string };
+type SongSection = { id: string; name: string };
 
 type Project = {
   id: string;
@@ -77,6 +79,7 @@ type Project = {
   albumId: string | null;
   goalIds: string[];
   genre: string;
+  sections: SongSection[];
 };
 
 function migrateBar(raw: Record<string, unknown>): Bar {
@@ -85,6 +88,7 @@ function migrateBar(raw: Record<string, unknown>): Bar {
     id: String(raw.id),
     text: String(raw.text ?? ''),
     themeId: themeId ?? null,
+    sectionId: (raw.sectionId as string | null) ?? null,
     characterFamilyId: (raw.characterFamilyId as string | null) ?? null,
     characterTag: (raw.characterTag as string | null) ?? null,
     artDevice: (raw.artDevice as string | null) ?? null,
@@ -106,6 +110,12 @@ function migrateProject(raw: Record<string, unknown>): Project {
     albumId: (raw.albumId as string | null) ?? null,
     goalIds: Array.isArray(raw.goalIds) ? (raw.goalIds as string[]) : [],
     genre: String(raw.genre ?? ''),
+    sections: Array.isArray(raw.sections)
+      ? (raw.sections as Record<string, unknown>[]).map((s) => ({
+          id: String(s.id),
+          name: String(s.name ?? 'Section'),
+        }))
+      : [],
   };
 }
 
@@ -261,6 +271,10 @@ export default function ImpactApp() {
 
   const [songsGroupBy, setSongsGroupBy] = useState<'album' | 'goal' | 'genre'>('album');
   const [hydrated, setHydrated] = useState(false);
+  const [selectedBarIds, setSelectedBarIds] = useState<string[]>([]);
+  const [newSectionName, setNewSectionName] = useState('');
+  const [bulkThemeValue, setBulkThemeValue] = useState<string>('');
+  const [bulkSectionValue, setBulkSectionValue] = useState<string>('');
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
@@ -272,6 +286,13 @@ export default function ImpactApp() {
     const raw = currentProject?.youtubeUrl?.trim();
     return raw ? extractYoutubeVideoId(raw) : null;
   }, [currentProject?.youtubeUrl]);
+
+  useEffect(() => {
+    setSelectedBarIds([]);
+    setBulkThemeValue('');
+    setBulkSectionValue('');
+    setNewSectionName('');
+  }, [currentProject?.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -467,6 +488,7 @@ export default function ImpactApp() {
           id: uuidv4(),
           text: '',
           themeId: null,
+          sectionId: null,
           characterFamilyId: null,
           characterTag: null,
           artDevice: null,
@@ -477,6 +499,7 @@ export default function ImpactApp() {
       albumId: null,
       goalIds: [],
       genre: '',
+      sections: [],
     };
     setProjects([newProject, ...projects]);
     setCurrentProject(newProject);
@@ -520,6 +543,7 @@ export default function ImpactApp() {
         id: uuidv4(),
         text: afterStr,
         themeId: null,
+        sectionId: currentProject.bars[index].sectionId ?? null,
         characterFamilyId: null,
         characterTag: null,
         artDevice: null,
@@ -578,7 +602,61 @@ export default function ImpactApp() {
     if (currentProject.bars.length === 1) return;
     const newBars = currentProject.bars.filter((b) => b.id !== barId);
     updateCurrentProject({ bars: newBars });
+    setSelectedBarIds((prev) => prev.filter((id) => id !== barId));
     if (expandedBarId === barId) setExpandedBarId(null);
+  };
+
+  const toggleBarSelection = (barId: string) => {
+    setSelectedBarIds((prev) => (prev.includes(barId) ? prev.filter((id) => id !== barId) : [...prev, barId]));
+  };
+
+  const selectAllBars = () => {
+    if (!currentProject) return;
+    setSelectedBarIds(currentProject.bars.map((b) => b.id));
+  };
+
+  const clearSelectedBars = () => {
+    setSelectedBarIds([]);
+  };
+
+  const moveSelectedBarsToSection = (sectionId: string | null) => {
+    if (!currentProject || selectedBarIds.length === 0) return;
+    const moved = currentProject.bars.map((b) =>
+      selectedBarIds.includes(b.id) ? { ...b, sectionId } : b
+    );
+    updateCurrentProject({ bars: moved });
+  };
+
+  const applyThemeToSelectedBars = (themeId: string | null) => {
+    if (!currentProject || selectedBarIds.length === 0) return;
+    const retagged = currentProject.bars.map((b) =>
+      selectedBarIds.includes(b.id) ? { ...b, themeId } : b
+    );
+    updateCurrentProject({ bars: retagged });
+  };
+
+  const addSongSection = () => {
+    if (!currentProject) return;
+    const label = newSectionName.trim() || `Section ${currentProject.sections.length + 1}`;
+    updateCurrentProject({
+      sections: [...currentProject.sections, { id: uuidv4(), name: label }],
+    });
+    setNewSectionName('');
+  };
+
+  const renameSongSection = (id: string, name: string) => {
+    if (!currentProject) return;
+    updateCurrentProject({
+      sections: currentProject.sections.map((s) => (s.id === id ? { ...s, name } : s)),
+    });
+  };
+
+  const deleteSongSection = (id: string) => {
+    if (!currentProject) return;
+    updateCurrentProject({
+      sections: currentProject.sections.filter((s) => s.id !== id),
+      bars: currentProject.bars.map((b) => (b.sectionId === id ? { ...b, sectionId: null } : b)),
+    });
   };
 
   const toggleLoop = () => {
@@ -703,12 +781,231 @@ export default function ImpactApp() {
     return map;
   }, [projects, albums, grammyGoals, songsGroupBy]);
 
+  const sectionNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    currentProject?.sections.forEach((s) => map.set(s.id, s.name));
+    return map;
+  }, [currentProject?.sections]);
+
+  const sectionBuckets = useMemo(() => {
+    if (!currentProject) return { sections: [] as { section: SongSection; bars: Bar[] }[], freeBars: [] as Bar[] };
+    const grouped = currentProject.sections.map((section) => ({
+      section,
+      bars: currentProject.bars.filter((b) => b.sectionId === section.id),
+    }));
+    const freeBars = currentProject.bars.filter(
+      (b) => !b.sectionId || !currentProject.sections.some((section) => section.id === b.sectionId)
+    );
+    return { sections: grouped, freeBars };
+  }, [currentProject]);
+
   function characterLabel(familyId: string | null, tag: string | null) {
     if (!familyId || !tag) return null;
     const fam = CHARACTER_FAMILIES.find((f) => f.id === familyId);
     if (!fam) return tag;
     return `${fam.name.split(' / ')[0]} · ${tag}`;
   }
+
+  const renderBarEditorRow = (bar: Bar, index: number) => {
+    if (!currentProject) return null;
+    const activeTheme = themes.find((c) => c.id === bar.themeId);
+    const fam = CHARACTER_FAMILIES.find((f) => f.id === bar.characterFamilyId);
+    const expanded = expandedBarId === bar.id;
+    const sectionLabel = bar.sectionId ? sectionNameById.get(bar.sectionId) : null;
+
+    return (
+      <SortableBarRow key={bar.id} id={bar.id}>
+        {({ dragHandleProps }) => (
+          <div>
+            <div className="bar-row">
+              <input
+                type="checkbox"
+                checked={selectedBarIds.includes(bar.id)}
+                onChange={() => toggleBarSelection(bar.id)}
+                aria-label="Select lyric line"
+                className="bar-select-checkbox"
+              />
+              <button {...dragHandleProps}>
+                <GripVertical size={18} />
+              </button>
+              <div className="bar-number">{index + 1}</div>
+              <div className="bar-input-container">
+                <BarTextField
+                  value={bar.text}
+                  onChange={(v) => handleBarChange(bar.id, v)}
+                  onKeyDown={(e) => handleBarKeyDown(e, index, bar.id)}
+                  placeholder={index === 0 ? 'First bar — Enter for next bar, Shift+Enter for a line break…' : ''}
+                  autoFocus={index === currentProject.bars.length - 1 && currentProject.bars.length > 1}
+                />
+                <div
+                  style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: '0.35rem',
+                    marginLeft: '0.5rem',
+                    marginTop: '0.25rem',
+                  }}
+                >
+                  {sectionLabel && (
+                    <span className="tag" style={{ background: 'rgba(59, 130, 246, 0.35)', fontSize: '0.7rem' }}>
+                      {sectionLabel}
+                    </span>
+                  )}
+                  {activeTheme && (
+                    <div className="category-badge" style={{ backgroundColor: activeTheme.color }}>
+                      {activeTheme.name}
+                    </div>
+                  )}
+                  {fam && bar.characterTag && (
+                    <span className="tag" style={{ background: 'rgba(139, 92, 246, 0.4)', fontSize: '0.7rem' }}>
+                      {fam.name.split(' / ')[0]} · {bar.characterTag}
+                    </span>
+                  )}
+                  {bar.artDevice && (
+                    <span className="tag" style={{ background: 'rgba(16, 185, 129, 0.4)', fontSize: '0.7rem' }}>
+                      {bar.artDevice}
+                    </span>
+                  )}
+                  {bar.sellFocus && (
+                    <span className="tag" style={{ background: 'rgba(236, 72, 153, 0.4)', fontSize: '0.7rem' }}>
+                      Sell: {bar.sellFocus}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <div className="bar-actions">
+                <button
+                  type="button"
+                  className="btn-icon-only btn-secondary"
+                  onClick={() => cycleTheme(bar.id, bar.themeId)}
+                  title="Cycle theme"
+                >
+                  <Tag size={16} color={activeTheme ? activeTheme.color : 'white'} />
+                </button>
+                <button
+                  type="button"
+                  className="btn-icon-only btn-secondary"
+                  onClick={() => setExpandedBarId(expanded ? null : bar.id)}
+                  title="Line tags: character, art, sell"
+                >
+                  {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                </button>
+                <button
+                  type="button"
+                  className="btn-icon-only btn-secondary"
+                  onClick={() => deleteBar(bar.id)}
+                  style={{ color: 'var(--danger)' }}
+                >
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            </div>
+            {expanded && (
+              <div className="glass bar-expand-panel">
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Section</label>
+                  <select
+                    value={bar.sectionId ?? ''}
+                    onChange={(e) => patchBar(bar.id, { sectionId: e.target.value || null })}
+                    style={{ width: '100%', marginTop: '0.25rem' }}
+                  >
+                    <option value="">— Free lyrics —</option>
+                    {currentProject.sections.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Theme</label>
+                  <select
+                    value={bar.themeId ?? ''}
+                    onChange={(e) => patchBar(bar.id, { themeId: e.target.value || null })}
+                    style={{ width: '100%', marginTop: '0.25rem' }}
+                  >
+                    <option value="">— None —</option>
+                    {themes.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Character family</label>
+                  <select
+                    value={bar.characterFamilyId ?? ''}
+                    onChange={(e) => {
+                      const id = e.target.value || null;
+                      patchBar(bar.id, {
+                        characterFamilyId: id,
+                        characterTag: null,
+                      });
+                    }}
+                    style={{ width: '100%', marginTop: '0.25rem' }}
+                  >
+                    <option value="">— None —</option>
+                    {CHARACTER_FAMILIES.map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Character tag</label>
+                  <select
+                    value={bar.characterTag ?? ''}
+                    onChange={(e) => patchBar(bar.id, { characterTag: e.target.value || null })}
+                    style={{ width: '100%', marginTop: '0.25rem' }}
+                    disabled={!bar.characterFamilyId}
+                  >
+                    <option value="">— Pick tag —</option>
+                    {(CHARACTER_FAMILIES.find((f) => f.id === bar.characterFamilyId)?.tags ?? []).map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Art (device)</label>
+                  <select
+                    value={bar.artDevice ?? ''}
+                    onChange={(e) => patchBar(bar.id, { artDevice: e.target.value || null })}
+                    style={{ width: '100%', marginTop: '0.25rem' }}
+                  >
+                    <option value="">— None —</option>
+                    {ART_DEVICES.map((a) => (
+                      <option key={a} value={a}>
+                        {a}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>What you&rsquo;re selling</label>
+                  <select
+                    value={bar.sellFocus ?? ''}
+                    onChange={(e) => patchBar(bar.id, { sellFocus: e.target.value || null })}
+                    style={{ width: '100%', marginTop: '0.25rem' }}
+                  >
+                    <option value="">— None —</option>
+                    {SELL_FOCUS_OPTIONS.map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </SortableBarRow>
+    );
+  };
 
   return (
     <div className="app-layout">
@@ -1416,185 +1713,136 @@ export default function ImpactApp() {
                 <CornerDownLeft size={20} color="var(--accent-color)" /> Bars &amp; lyric tags
               </h3>
               <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
-                Theme = structure. Open &ldquo;Line tags&rdquo; for character, art (device), and what you&rsquo;re selling. Drag the
-                grip to reorder bars (works on phone). Enter starts a new bar; Shift+Enter adds a line break in the same bar.
+                Group-select lines, tag in bulk, and move lyrics into sections. Free lyrics stay at the bottom until you assign
+                them.
               </p>
+
+              <div className="sections-manager glass">
+                <div className="sections-manager-row">
+                  <input
+                    value={newSectionName}
+                    onChange={(e) => setNewSectionName(e.target.value)}
+                    placeholder="Add section (Hook, Verse 1, Bridge...)"
+                    style={{ flex: 1 }}
+                  />
+                  <button type="button" className="btn-secondary" onClick={addSongSection}>
+                    <Plus size={16} /> Add section
+                  </button>
+                </div>
+                <div className="sections-list">
+                  {currentProject.sections.length === 0 && (
+                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                      No sections yet. Add one and move selected lyrics into it.
+                    </div>
+                  )}
+                  {currentProject.sections.map((section) => (
+                    <div key={section.id} className="section-row">
+                      <input
+                        value={section.name}
+                        onChange={(e) => renameSongSection(section.id, e.target.value)}
+                        style={{ flex: 1, padding: '0.5rem 0.75rem' }}
+                      />
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={() => moveSelectedBarsToSection(section.id)}
+                        disabled={selectedBarIds.length === 0}
+                      >
+                        Move selected here
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-secondary btn-icon-only"
+                        onClick={() => deleteSongSection(section.id)}
+                        style={{ color: 'var(--danger)' }}
+                        title="Delete section"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="bulk-actions-row glass">
+                <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                  {selectedBarIds.length} selected
+                </span>
+                <button type="button" className="btn-secondary" onClick={selectAllBars}>
+                  Select all
+                </button>
+                <button type="button" className="btn-secondary" onClick={clearSelectedBars}>
+                  Clear
+                </button>
+                <select value={bulkThemeValue} onChange={(e) => setBulkThemeValue(e.target.value)} style={{ minWidth: '170px' }}>
+                  <option value="">Theme: clear</option>
+                  {themes.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      Theme: {t.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => applyThemeToSelectedBars(bulkThemeValue || null)}
+                  disabled={selectedBarIds.length === 0}
+                >
+                  Tag selected
+                </button>
+                <select value={bulkSectionValue} onChange={(e) => setBulkSectionValue(e.target.value)} style={{ minWidth: '180px' }}>
+                  <option value="">Move to free lyrics</option>
+                  {currentProject.sections.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      Move to: {s.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => moveSelectedBarsToSection(bulkSectionValue || null)}
+                  disabled={selectedBarIds.length === 0}
+                >
+                  Move selected
+                </button>
+              </div>
 
               <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleBarsDragEnd}>
                 <SortableContext items={currentProject.bars.map((b) => b.id)} strategy={verticalListSortingStrategy}>
-                  {currentProject.bars.map((bar, index) => {
-                    const activeTheme = themes.find((c) => c.id === bar.themeId);
-                    const fam = CHARACTER_FAMILIES.find((f) => f.id === bar.characterFamilyId);
-                    const expanded = expandedBarId === bar.id;
-
-                    return (
-                      <SortableBarRow key={bar.id} id={bar.id}>
-                        {({ dragHandleProps }) => (
-                          <div>
-                            <div className="bar-row">
-                              <button {...dragHandleProps}>
-                                <GripVertical size={18} />
-                              </button>
-                              <div className="bar-number">{index + 1}</div>
-                              <div className="bar-input-container">
-                                <BarTextField
-                                  value={bar.text}
-                                  onChange={(v) => handleBarChange(bar.id, v)}
-                                  onKeyDown={(e) => handleBarKeyDown(e, index, bar.id)}
-                                  placeholder={
-                                    index === 0 ? 'First bar — Enter for next bar, Shift+Enter for a line break…' : ''
-                                  }
-                                  autoFocus={index === currentProject.bars.length - 1 && currentProject.bars.length > 1}
-                                />
-                                <div
-                                  style={{
-                                    display: 'flex',
-                                    flexWrap: 'wrap',
-                                    gap: '0.35rem',
-                                    marginLeft: '0.5rem',
-                                    marginTop: '0.25rem',
-                                  }}
-                                >
-                                  {activeTheme && (
-                                    <div className="category-badge" style={{ backgroundColor: activeTheme.color }}>
-                                      {activeTheme.name}
-                                    </div>
-                                  )}
-                                  {fam && bar.characterTag && (
-                                    <span className="tag" style={{ background: 'rgba(139, 92, 246, 0.4)', fontSize: '0.7rem' }}>
-                                      {fam.name.split(' / ')[0]} · {bar.characterTag}
-                                    </span>
-                                  )}
-                                  {bar.artDevice && (
-                                    <span className="tag" style={{ background: 'rgba(16, 185, 129, 0.4)', fontSize: '0.7rem' }}>
-                                      {bar.artDevice}
-                                    </span>
-                                  )}
-                                  {bar.sellFocus && (
-                                    <span className="tag" style={{ background: 'rgba(236, 72, 153, 0.4)', fontSize: '0.7rem' }}>
-                                      Sell: {bar.sellFocus}
-                                    </span>
-                                  )}
-                                </div>
-                              </div>
-                              <div className="bar-actions">
-                                <button
-                                  type="button"
-                                  className="btn-icon-only btn-secondary"
-                                  onClick={() => cycleTheme(bar.id, bar.themeId)}
-                                  title="Cycle theme"
-                                >
-                                  <Tag size={16} color={activeTheme ? activeTheme.color : 'white'} />
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn-icon-only btn-secondary"
-                                  onClick={() => setExpandedBarId(expanded ? null : bar.id)}
-                                  title="Line tags: character, art, sell"
-                                >
-                                  {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn-icon-only btn-secondary"
-                                  onClick={() => deleteBar(bar.id)}
-                                  style={{ color: 'var(--danger)' }}
-                                >
-                                  <Trash2 size={16} />
-                                </button>
-                              </div>
-                            </div>
-                            {expanded && (
-                      <div className="glass bar-expand-panel">
-                        <div style={{ gridColumn: '1 / -1' }}>
-                          <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Theme</label>
-                          <select
-                            value={bar.themeId ?? ''}
-                            onChange={(e) => patchBar(bar.id, { themeId: e.target.value || null })}
-                            style={{ width: '100%', marginTop: '0.25rem' }}
-                          >
-                            <option value="">— None —</option>
-                            {themes.map((t) => (
-                              <option key={t.id} value={t.id}>
-                                {t.name}
-                              </option>
-                            ))}
-                          </select>
+                  <div className="sections-stack">
+                    {sectionBuckets.sections.map(({ section, bars }) => (
+                      <div key={section.id} className="section-block">
+                        <div className="section-heading">
+                          <h4>{section.name}</h4>
+                          <span>{bars.length} lines</span>
                         </div>
-                        <div>
-                          <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Character family</label>
-                          <select
-                            value={bar.characterFamilyId ?? ''}
-                            onChange={(e) => {
-                              const id = e.target.value || null;
-                              patchBar(bar.id, {
-                                characterFamilyId: id,
-                                characterTag: null,
-                              });
-                            }}
-                            style={{ width: '100%', marginTop: '0.25rem' }}
-                          >
-                            <option value="">— None —</option>
-                            {CHARACTER_FAMILIES.map((f) => (
-                              <option key={f.id} value={f.id}>
-                                {f.name}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                        <div>
-                          <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Character tag</label>
-                          <select
-                            value={bar.characterTag ?? ''}
-                            onChange={(e) => patchBar(bar.id, { characterTag: e.target.value || null })}
-                            style={{ width: '100%', marginTop: '0.25rem' }}
-                            disabled={!bar.characterFamilyId}
-                          >
-                            <option value="">— Pick tag —</option>
-                            {(CHARACTER_FAMILIES.find((f) => f.id === bar.characterFamilyId)?.tags ?? []).map((t) => (
-                              <option key={t} value={t}>
-                                {t}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                        <div>
-                          <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Art (device)</label>
-                          <select
-                            value={bar.artDevice ?? ''}
-                            onChange={(e) => patchBar(bar.id, { artDevice: e.target.value || null })}
-                            style={{ width: '100%', marginTop: '0.25rem' }}
-                          >
-                            <option value="">— None —</option>
-                            {ART_DEVICES.map((a) => (
-                              <option key={a} value={a}>
-                                {a}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                        <div>
-                          <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>What you&rsquo;re selling</label>
-                          <select
-                            value={bar.sellFocus ?? ''}
-                            onChange={(e) => patchBar(bar.id, { sellFocus: e.target.value || null })}
-                            style={{ width: '100%', marginTop: '0.25rem' }}
-                          >
-                            <option value="">— None —</option>
-                            {SELL_FOCUS_OPTIONS.map((s) => (
-                              <option key={s} value={s}>
-                                {s}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      </div>
-                            )}
-                          </div>
+                        {bars.length === 0 ? (
+                          <p className="section-empty">No lyrics in this section yet.</p>
+                        ) : (
+                          bars.map((bar) => {
+                            const barIndex = currentProject.bars.findIndex((b) => b.id === bar.id);
+                            return renderBarEditorRow(bar, barIndex < 0 ? 0 : barIndex);
+                          })
                         )}
-                      </SortableBarRow>
-                    );
-                  })}
+                      </div>
+                    ))}
+
+                    <div className="section-block free-lyrics-block">
+                      <div className="section-heading">
+                        <h4>Free lyrics</h4>
+                        <span>{sectionBuckets.freeBars.length} lines</span>
+                      </div>
+                      {sectionBuckets.freeBars.length === 0 ? (
+                        <p className="section-empty">No free lyrics right now.</p>
+                      ) : (
+                        sectionBuckets.freeBars.map((bar) => {
+                          const barIndex = currentProject.bars.findIndex((b) => b.id === bar.id);
+                          return renderBarEditorRow(bar, barIndex < 0 ? 0 : barIndex);
+                        })
+                      )}
+                    </div>
+                  </div>
                 </SortableContext>
               </DndContext>
             </div>

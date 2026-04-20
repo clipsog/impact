@@ -268,7 +268,87 @@ input:focus, textarea:focus {
   padding: 2rem;
   display: flex;
   flex-direction: column;
+  gap: 0.9rem;
+}
+
+.sections-manager {
+  padding: 0.9rem;
+}
+
+.sections-manager-row {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.sections-list {
+  margin-top: 0.6rem;
+  display: flex;
+  flex-direction: column;
   gap: 0.5rem;
+}
+
+.section-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.bulk-actions-row {
+  padding: 0.8rem;
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.sections-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.section-block {
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  padding: 0.75rem;
+}
+
+.section-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 0.35rem;
+}
+
+.section-heading h4 {
+  font-size: 0.95rem;
+}
+
+.section-heading span {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.section-empty {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  padding: 0.25rem 0.5rem;
+}
+
+.free-lyrics-block {
+  border-style: dashed;
+}
+
+.bar-select-checkbox {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 4px;
+  margin-top: 0.6rem;
+  accent-color: var(--accent-color);
+  flex: 0 0 auto;
 }
 
 .bar-row {
@@ -572,6 +652,16 @@ textarea.bar-input {
 
   .lyrics-container {
     padding: 1rem;
+  }
+
+  .bulk-actions-row {
+    align-items: stretch;
+  }
+
+  .bulk-actions-row select,
+  .bulk-actions-row button,
+  .sections-manager-row button {
+    width: 100%;
   }
 
   .bar-row {
