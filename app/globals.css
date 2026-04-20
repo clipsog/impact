@@ -143,6 +143,7 @@ input:focus, textarea:focus {
   max-width: 1400px;
   margin: 0 auto;
   overflow-y: auto;
+  min-width: 0;
 }
 
 .categories-list {
@@ -297,6 +298,7 @@ input:focus, textarea:focus {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 .bar-input {
@@ -307,8 +309,17 @@ input:focus, textarea:focus {
   outline: none;
   color: var(--text-primary);
   width: 100%;
+  max-width: 100%;
   padding: 0.25rem 0.5rem;
   border-radius: 6px;
+}
+
+textarea.bar-input {
+  resize: none;
+  overflow: hidden;
+  min-height: 2.75rem;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .bar-input:focus {
@@ -396,6 +407,30 @@ input:focus, textarea:focus {
 .bar-content {
   font-size: 1.25rem;
   font-weight: 500;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+}
+
+.lyrics-theme-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 350px), 1fr));
+  gap: 1rem;
+}
+
+.bar-drag-handle,
+.card-drag-handle {
+  flex-shrink: 0;
+  touch-action: none;
+  cursor: grab;
+}
+
+.bar-drag-handle:active,
+.card-drag-handle:active {
+  cursor: grabbing;
+}
+
+.sortable-dragging {
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
 }
 
 .bar-source {
@@ -561,6 +596,10 @@ input:focus, textarea:focus {
 
   .bar-expand-panel {
     margin: 0 0 1rem 0;
+    grid-template-columns: 1fr;
+  }
+
+  .lyrics-theme-grid {
     grid-template-columns: 1fr;
   }
 }

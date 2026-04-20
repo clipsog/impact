@@ -1,7 +1,26 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useLayoutEffect } from 'react';
 import { v4 as uuidv4 } from 'uuid';
+import {
+  DndContext,
+  type DragEndEvent,
+  KeyboardSensor,
+  PointerSensor,
+  TouchSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  arrayMove,
+  rectSortingStrategy,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import {
   Play,
   Pause,
@@ -21,6 +40,7 @@ import {
   ChevronDown,
   ChevronUp,
   Pencil,
+  GripVertical,
 } from 'lucide-react';
 import {
   type Theme,
@@ -95,6 +115,130 @@ const LS_CATEGORIES_LEGACY = 'impact_categories';
 const LS_ALBUMS = 'impact_albums';
 const LS_GOALS = 'impact_grammy_goals';
 
+function BarTextField({
+  value,
+  onChange,
+  onKeyDown,
+  placeholder,
+  autoFocus,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
+  placeholder?: string;
+  autoFocus?: boolean;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.max(el.scrollHeight, 44)}px`;
+  }, [value]);
+  return (
+    <textarea
+      ref={ref}
+      className="bar-input"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      onKeyDown={onKeyDown}
+      placeholder={placeholder}
+      autoFocus={autoFocus}
+      rows={1}
+      spellCheck={false}
+    />
+  );
+}
+
+function SortableProjectCard({
+  project,
+  onOpen,
+}: {
+  project: Project;
+  onOpen: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({
+    id: project.id,
+  });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    zIndex: isDragging ? 2 : undefined,
+    opacity: isDragging ? 0.92 : 1,
+  };
+  return (
+    <div ref={setNodeRef} style={style} className={`card glass ${isDragging ? 'sortable-dragging' : ''}`}>
+      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
+        <button
+          type="button"
+          ref={setActivatorNodeRef}
+          className="btn-icon-only btn-secondary card-drag-handle"
+          aria-label="Drag to reorder track"
+          {...listeners}
+          {...attributes}
+        >
+          <GripVertical size={20} />
+        </button>
+        <div
+          style={{ flex: 1, minWidth: 0, cursor: 'pointer' }}
+          onClick={onOpen}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onOpen();
+            }
+          }}
+          role="button"
+          tabIndex={0}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <h3 className="card-title">{project.title}</h3>
+            <Music size={24} color="var(--accent-color)" />
+          </div>
+          <div className="card-meta">
+            {project.bars.length} bars • {project.genre ? `${project.genre} • ` : ''}
+            Last updated {new Date(project.updatedAt).toLocaleDateString()}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SortableBarRow({
+  id,
+  children,
+}: {
+  id: string;
+  children: (args: {
+    dragHandleProps: React.ComponentProps<'button'>;
+    isDragging: boolean;
+  }) => React.ReactNode;
+}) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({
+    id,
+  });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    zIndex: isDragging ? 2 : undefined,
+    opacity: isDragging ? 0.92 : 1,
+  };
+  const dragHandleProps = {
+    type: 'button' as const,
+    ref: setActivatorNodeRef,
+    className: 'btn-icon-only btn-secondary bar-drag-handle',
+    'aria-label': 'Drag to reorder bar',
+    ...listeners,
+    ...attributes,
+  };
+  return (
+    <div ref={setNodeRef} style={style} className={isDragging ? 'sortable-dragging' : undefined}>
+      {children({ dragHandleProps, isDragging })}
+    </div>
+  );
+}
+
 export default function ImpactApp() {
   const [activeTab, setActiveTab] = useState<'home' | 'project' | 'lyrics' | 'songs' | 'themes'>('home');
   const [projects, setProjects] = useState<Project[]>([]);
@@ -117,6 +261,12 @@ export default function ImpactApp() {
 
   const [songsGroupBy, setSongsGroupBy] = useState<'album' | 'goal' | 'genre'>('album');
   const [hydrated, setHydrated] = useState(false);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 220, tolerance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  );
 
   const beatYoutubeId = useMemo(() => {
     const raw = currentProject?.youtubeUrl?.trim();
@@ -352,13 +502,16 @@ export default function ImpactApp() {
     updateCurrentProject({ bars: newBars });
   };
 
-  const handleBarKeyDown = (e: React.KeyboardEvent, index: number, id: string) => {
+  const handleBarKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>, index: number, id: string) => {
     if (!currentProject) return;
-    if (e.key === 'Enter') {
+    if (e.key === 'Enter' && e.shiftKey) {
+      return;
+    }
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       const newBars = [...currentProject.bars];
-      const target = e.target as HTMLInputElement;
-      const cursorActive = target.selectionStart || 0;
+      const target = e.currentTarget;
+      const cursorActive = target.selectionStart ?? 0;
       const currentText = newBars[index].text;
       const beforeStr = currentText.slice(0, cursorActive);
       const afterStr = currentText.slice(cursorActive);
@@ -376,7 +529,7 @@ export default function ImpactApp() {
       updateCurrentProject({ bars: newBars });
       setTimeout(() => {
         const inputs = document.querySelectorAll('.bar-input');
-        if (inputs[index + 1]) (inputs[index + 1] as HTMLInputElement).focus();
+        if (inputs[index + 1]) (inputs[index + 1] as HTMLTextAreaElement).focus();
       }, 10);
     }
     if (e.key === 'Backspace' && currentProject.bars[index].text === '' && currentProject.bars.length > 1) {
@@ -387,12 +540,31 @@ export default function ImpactApp() {
       setTimeout(() => {
         const inputs = document.querySelectorAll('.bar-input');
         if (inputs[index - 1]) {
-          const input = inputs[index - 1] as HTMLInputElement;
+          const input = inputs[index - 1] as HTMLTextAreaElement;
           input.focus();
           input.setSelectionRange(input.value.length, input.value.length);
         }
       }, 10);
     }
+  };
+
+  const handleProjectsDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const oldIndex = projects.findIndex((p) => p.id === active.id);
+    const newIndex = projects.findIndex((p) => p.id === over.id);
+    if (oldIndex < 0 || newIndex < 0) return;
+    setProjects(arrayMove(projects, oldIndex, newIndex));
+  };
+
+  const handleBarsDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!currentProject) return;
+    if (!over || active.id === over.id) return;
+    const oldIndex = currentProject.bars.findIndex((b) => b.id === active.id);
+    const newIndex = currentProject.bars.findIndex((b) => b.id === over.id);
+    if (oldIndex < 0 || newIndex < 0) return;
+    updateCurrentProject({ bars: arrayMove(currentProject.bars, oldIndex, newIndex) });
   };
 
   const cycleTheme = (barId: string, currentThemeId: string | null) => {
@@ -690,40 +862,34 @@ export default function ImpactApp() {
                 <Plus size={20} /> New Track
               </button>
             </div>
-            <div className="grid-cards">
-              {projects.map((proj) => (
-                <div
-                  key={proj.id}
-                  className="card glass"
-                  onClick={() => {
-                    setCurrentProject(proj);
-                    setActiveTab('project');
-                  }}
-                  role="presentation"
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                    <h3 className="card-title">{proj.title}</h3>
-                    <Music size={24} color="var(--accent-color)" />
-                  </div>
-                  <div className="card-meta">
-                    {proj.bars.length} bars • {proj.genre ? `${proj.genre} • ` : ''}
-                    Last updated {new Date(proj.updatedAt).toLocaleDateString()}
-                  </div>
+            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleProjectsDragEnd}>
+              <SortableContext items={projects.map((p) => p.id)} strategy={rectSortingStrategy}>
+                <div className="grid-cards">
+                  {projects.map((proj) => (
+                    <SortableProjectCard
+                      key={proj.id}
+                      project={proj}
+                      onOpen={() => {
+                        setCurrentProject(proj);
+                        setActiveTab('project');
+                      }}
+                    />
+                  ))}
+                  {projects.length === 0 && (
+                    <div
+                      style={{
+                        color: 'var(--text-secondary)',
+                        gridColumn: '1 / -1',
+                        textAlign: 'center',
+                        padding: '4rem 0',
+                      }}
+                    >
+                      No tracks yet. Create your first hit!
+                    </div>
+                  )}
                 </div>
-              ))}
-              {projects.length === 0 && (
-                <div
-                  style={{
-                    color: 'var(--text-secondary)',
-                    gridColumn: '1 / -1',
-                    textAlign: 'center',
-                    padding: '4rem 0',
-                  }}
-                >
-                  No tracks yet. Create your first hit!
-                </div>
-              )}
-            </div>
+              </SortableContext>
+            </DndContext>
           </div>
         )}
 
@@ -776,10 +942,7 @@ export default function ImpactApp() {
                       <>Unthemed ({section.items.length})</>
                     )}
                   </h3>
-                  <div
-                    className="grid-cards"
-                    style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(350px, 1fr))', gap: '1rem' }}
-                  >
+                  <div className="grid-cards lyrics-theme-grid">
                     {section.items.map((item, i) => (
                       <div key={`${item.projectId}-${item.bar.id}-${i}`} className="glass category-bar-card">
                         <div className="bar-content">&ldquo;{item.bar.text}&rdquo;</div>
@@ -1253,79 +1416,95 @@ export default function ImpactApp() {
                 <CornerDownLeft size={20} color="var(--accent-color)" /> Bars &amp; lyric tags
               </h3>
               <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
-                Theme = structure. Open &ldquo;Line tags&rdquo; for character, art (device), and what you&rsquo;re selling.
+                Theme = structure. Open &ldquo;Line tags&rdquo; for character, art (device), and what you&rsquo;re selling. Drag the
+                grip to reorder bars (works on phone). Enter starts a new bar; Shift+Enter adds a line break in the same bar.
               </p>
 
-              {currentProject.bars.map((bar, index) => {
-                const activeTheme = themes.find((c) => c.id === bar.themeId);
-                const fam = CHARACTER_FAMILIES.find((f) => f.id === bar.characterFamilyId);
-                const expanded = expandedBarId === bar.id;
+              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleBarsDragEnd}>
+                <SortableContext items={currentProject.bars.map((b) => b.id)} strategy={verticalListSortingStrategy}>
+                  {currentProject.bars.map((bar, index) => {
+                    const activeTheme = themes.find((c) => c.id === bar.themeId);
+                    const fam = CHARACTER_FAMILIES.find((f) => f.id === bar.characterFamilyId);
+                    const expanded = expandedBarId === bar.id;
 
-                return (
-                  <div key={bar.id}>
-                    <div className="bar-row">
-                      <div className="bar-number">{index + 1}</div>
-                      <div className="bar-input-container">
-                        <input
-                          type="text"
-                          className="bar-input"
-                          value={bar.text}
-                          onChange={(e) => handleBarChange(bar.id, e.target.value)}
-                          onKeyDown={(e) => handleBarKeyDown(e, index, bar.id)}
-                          placeholder={index === 0 ? 'Type your first bar and press Enter...' : ''}
-                          autoFocus={index === currentProject.bars.length - 1 && currentProject.bars.length > 1}
-                        />
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginLeft: '0.5rem', marginTop: '0.25rem' }}>
-                          {activeTheme && (
-                            <div className="category-badge" style={{ backgroundColor: activeTheme.color }}>
-                              {activeTheme.name}
+                    return (
+                      <SortableBarRow key={bar.id} id={bar.id}>
+                        {({ dragHandleProps }) => (
+                          <div>
+                            <div className="bar-row">
+                              <button {...dragHandleProps}>
+                                <GripVertical size={18} />
+                              </button>
+                              <div className="bar-number">{index + 1}</div>
+                              <div className="bar-input-container">
+                                <BarTextField
+                                  value={bar.text}
+                                  onChange={(v) => handleBarChange(bar.id, v)}
+                                  onKeyDown={(e) => handleBarKeyDown(e, index, bar.id)}
+                                  placeholder={
+                                    index === 0 ? 'First bar — Enter for next bar, Shift+Enter for a line break…' : ''
+                                  }
+                                  autoFocus={index === currentProject.bars.length - 1 && currentProject.bars.length > 1}
+                                />
+                                <div
+                                  style={{
+                                    display: 'flex',
+                                    flexWrap: 'wrap',
+                                    gap: '0.35rem',
+                                    marginLeft: '0.5rem',
+                                    marginTop: '0.25rem',
+                                  }}
+                                >
+                                  {activeTheme && (
+                                    <div className="category-badge" style={{ backgroundColor: activeTheme.color }}>
+                                      {activeTheme.name}
+                                    </div>
+                                  )}
+                                  {fam && bar.characterTag && (
+                                    <span className="tag" style={{ background: 'rgba(139, 92, 246, 0.4)', fontSize: '0.7rem' }}>
+                                      {fam.name.split(' / ')[0]} · {bar.characterTag}
+                                    </span>
+                                  )}
+                                  {bar.artDevice && (
+                                    <span className="tag" style={{ background: 'rgba(16, 185, 129, 0.4)', fontSize: '0.7rem' }}>
+                                      {bar.artDevice}
+                                    </span>
+                                  )}
+                                  {bar.sellFocus && (
+                                    <span className="tag" style={{ background: 'rgba(236, 72, 153, 0.4)', fontSize: '0.7rem' }}>
+                                      Sell: {bar.sellFocus}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="bar-actions">
+                                <button
+                                  type="button"
+                                  className="btn-icon-only btn-secondary"
+                                  onClick={() => cycleTheme(bar.id, bar.themeId)}
+                                  title="Cycle theme"
+                                >
+                                  <Tag size={16} color={activeTheme ? activeTheme.color : 'white'} />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn-icon-only btn-secondary"
+                                  onClick={() => setExpandedBarId(expanded ? null : bar.id)}
+                                  title="Line tags: character, art, sell"
+                                >
+                                  {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn-icon-only btn-secondary"
+                                  onClick={() => deleteBar(bar.id)}
+                                  style={{ color: 'var(--danger)' }}
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              </div>
                             </div>
-                          )}
-                          {fam && bar.characterTag && (
-                            <span className="tag" style={{ background: 'rgba(139, 92, 246, 0.4)', fontSize: '0.7rem' }}>
-                              {fam.name.split(' / ')[0]} · {bar.characterTag}
-                            </span>
-                          )}
-                          {bar.artDevice && (
-                            <span className="tag" style={{ background: 'rgba(16, 185, 129, 0.4)', fontSize: '0.7rem' }}>
-                              {bar.artDevice}
-                            </span>
-                          )}
-                          {bar.sellFocus && (
-                            <span className="tag" style={{ background: 'rgba(236, 72, 153, 0.4)', fontSize: '0.7rem' }}>
-                              Sell: {bar.sellFocus}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="bar-actions">
-                        <button
-                          type="button"
-                          className="btn-icon-only btn-secondary"
-                          onClick={() => cycleTheme(bar.id, bar.themeId)}
-                          title="Cycle theme"
-                        >
-                          <Tag size={16} color={activeTheme ? activeTheme.color : 'white'} />
-                        </button>
-                        <button
-                          type="button"
-                          className="btn-icon-only btn-secondary"
-                          onClick={() => setExpandedBarId(expanded ? null : bar.id)}
-                          title="Line tags: character, art, sell"
-                        >
-                          {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn-icon-only btn-secondary"
-                          onClick={() => deleteBar(bar.id)}
-                          style={{ color: 'var(--danger)' }}
-                        >
-                          <Trash2 size={16} />
-                        </button>
-                      </div>
-                    </div>
-                    {expanded && (
+                            {expanded && (
                       <div className="glass bar-expand-panel">
                         <div style={{ gridColumn: '1 / -1' }}>
                           <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Theme</label>
@@ -1410,10 +1589,14 @@ export default function ImpactApp() {
                           </select>
                         </div>
                       </div>
-                    )}
-                  </div>
-                );
-              })}
+                            )}
+                          </div>
+                        )}
+                      </SortableBarRow>
+                    );
+                  })}
+                </SortableContext>
+              </DndContext>
             </div>
           </div>
         )}
