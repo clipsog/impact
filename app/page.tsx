@@ -54,6 +54,13 @@ import {
   type GrammyGoal,
 } from '@/lib/impact-data';
 import { extractYoutubeVideoId } from '@/lib/youtube';
+import {
+  loadYoutubeIframeApi,
+  YT_STATE_ENDED,
+  YT_STATE_PAUSED,
+  YT_STATE_PLAYING,
+  type YTPlayerInstance,
+} from '@/lib/youtube-iframe-api';
 
 type Bar = {
   id: string;
@@ -306,6 +313,25 @@ export default function ImpactApp() {
   const [draftRecording, setDraftRecording] = useState(false);
   projectIdRef.current = currentProject?.id ?? null;
 
+  const playerUrlRef = useRef<string | null>(null);
+  const useEmbedPlayerRef = useRef(false);
+  playerUrlRef.current = playerUrl;
+  useEmbedPlayerRef.current = useEmbedPlayer;
+
+  const melodicDraftsRef = useRef<MelodicDraft[]>([]);
+  melodicDraftsRef.current = currentProject?.melodicDrafts ?? [];
+
+  const beatLoopRef = useRef({ isLooping: false, loopStart: 0, loopEnd: 0 });
+  beatLoopRef.current = {
+    isLooping: !!currentProject?.isLooping,
+    loopStart: currentProject?.loopStart ?? 0,
+    loopEnd: currentProject?.loopEnd ?? duration,
+  };
+
+  const ytMountRef = useRef<HTMLDivElement | null>(null);
+  const ytPlayerRef = useRef<YTPlayerInstance | null>(null);
+  const [ytApiReady, setYtApiReady] = useState(false);
+
   const [songsGroupBy, setSongsGroupBy] = useState<'album' | 'goal' | 'genre'>('album');
   const [hydrated, setHydrated] = useState(false);
   const [selectedBarIds, setSelectedBarIds] = useState<string[]>([]);
@@ -537,13 +563,41 @@ export default function ImpactApp() {
   };
 
   const syncMelodicDraftPlayback = () => {
-    const beat = audioRef.current;
-    const drafts = currentProject?.melodicDrafts ?? [];
-    if (!beat || beat.paused || !playerUrl || useEmbedPlayer) {
+    const drafts = melodicDraftsRef.current;
+    const streamUrl = playerUrlRef.current;
+    const embed = useEmbedPlayerRef.current;
+
+    let t: number;
+    let playing: boolean;
+
+    if (streamUrl && !embed) {
+      const beat = audioRef.current;
+      if (!beat) {
+        pauseAllMelodicDrafts();
+        return;
+      }
+      playing = !beat.paused;
+      t = beat.currentTime;
+    } else if (embed && ytPlayerRef.current) {
+      const yt = ytPlayerRef.current;
+      const state = yt.getPlayerState();
+      playing = state === YT_STATE_PLAYING;
+      try {
+        t = yt.getCurrentTime();
+      } catch {
+        pauseAllMelodicDrafts();
+        return;
+      }
+    } else {
       pauseAllMelodicDrafts();
       return;
     }
-    const t = beat.currentTime;
+
+    if (!playing) {
+      pauseAllMelodicDrafts();
+      return;
+    }
+
     for (const d of drafts) {
       if (!d.audioDataUrl || d.duration <= 0) continue;
       const el = draftAudioRefs.current.get(d.id);
@@ -628,9 +682,12 @@ export default function ImpactApp() {
 
   const startMelodicDraftRecording = async () => {
     if (draftRecording) return;
-    if (!playerUrl || useEmbedPlayer || !audioRef.current) {
+    if (playerLoading) return;
+    const canStream = Boolean(playerUrl && !useEmbedPlayer && audioRef.current);
+    const canEmbed = Boolean(useEmbedPlayer && beatYoutubeId && ytApiReady && ytPlayerRef.current);
+    if (!canStream && !canEmbed) {
       window.alert(
-        'Melodic drafts need the streamed instrumental in this player (not YouTube embed-only). Use a normal watch URL until audio loads here, then record.'
+        'Wait for the beat player to finish loading, then record. If this message persists, check that your YouTube URL is valid.'
       );
       return;
     }
@@ -646,7 +703,17 @@ export default function ImpactApp() {
       const mr = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
       mediaRecorderRef.current = mr;
       recordChunksRef.current = [];
-      recordStartBeatRef.current = audioRef.current.currentTime;
+      if (canStream && audioRef.current) {
+        recordStartBeatRef.current = audioRef.current.currentTime;
+      } else if (ytPlayerRef.current) {
+        try {
+          recordStartBeatRef.current = ytPlayerRef.current.getCurrentTime();
+        } catch {
+          recordStartBeatRef.current = 0;
+        }
+      } else {
+        recordStartBeatRef.current = 0;
+      }
       recordStartWallRef.current = performance.now();
       mr.ondataavailable = (e) => {
         if (e.data.size) recordChunksRef.current.push(e.data);
@@ -686,7 +753,159 @@ export default function ImpactApp() {
     });
   };
 
+  useEffect(() => {
+    if (!useEmbedPlayer || !beatYoutubeId) {
+      setYtApiReady(false);
+      ytPlayerRef.current = null;
+      return;
+    }
+
+    let cancelled = false;
+    const created = { current: null as YTPlayerInstance | null };
+
+    void (async () => {
+      try {
+        await loadYoutubeIframeApi();
+      } catch {
+        if (!cancelled) setYtApiReady(false);
+        return;
+      }
+      if (cancelled) return;
+      const mountEl = ytMountRef.current;
+      if (!mountEl) return;
+      mountEl.innerHTML = '';
+
+      const win = window as unknown as {
+        YT: {
+          Player: new (
+            el: HTMLElement,
+            opts: {
+              videoId: string;
+              playerVars: Record<string, string | number | undefined>;
+              events: {
+                onReady: (e: { target: YTPlayerInstance }) => void;
+                onStateChange: (e: { data: number; target: YTPlayerInstance }) => void;
+              };
+            }
+          ) => YTPlayerInstance;
+        };
+      };
+
+      if (cancelled) return;
+      const player = new win.YT.Player(mountEl, {
+        videoId: beatYoutubeId,
+        playerVars: {
+          playsinline: 1,
+          rel: 0,
+          controls: 1,
+          enablejsapi: 1,
+          origin: typeof window !== 'undefined' ? window.location.origin : undefined,
+          modestbranding: 1,
+        },
+        events: {
+          onReady: (e) => {
+            if (cancelled) return;
+            ytPlayerRef.current = e.target;
+            try {
+              setDuration(e.target.getDuration() || 0);
+            } catch {
+              setDuration(0);
+            }
+            setYtApiReady(true);
+            setCurrentTime(0);
+          },
+          onStateChange: (e) => {
+            if (cancelled) return;
+            const st = e.data;
+            if (st === YT_STATE_PLAYING) {
+              setIsPlaying(true);
+              syncMelodicDraftPlayback();
+            } else if (st === YT_STATE_PAUSED || st === YT_STATE_ENDED) {
+              setIsPlaying(false);
+              pauseAllMelodicDrafts();
+            }
+          },
+        },
+      });
+      created.current = player;
+      if (cancelled) {
+        try {
+          player.destroy();
+        } catch {
+          /* ignore */
+        }
+        created.current = null;
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      setYtApiReady(false);
+      ytPlayerRef.current = null;
+      try {
+        created.current?.destroy();
+      } catch {
+        /* ignore */
+      }
+      created.current = null;
+      if (ytMountRef.current) ytMountRef.current.innerHTML = '';
+    };
+  }, [useEmbedPlayer, beatYoutubeId]);
+
+  useEffect(() => {
+    if (!useEmbedPlayer || !isPlaying) return;
+    let stopped = false;
+    let raf = 0;
+    const tick = () => {
+      if (stopped) return;
+      const yt = ytPlayerRef.current;
+      if (!yt || yt.getPlayerState() !== YT_STATE_PLAYING) {
+        raf = requestAnimationFrame(tick);
+        return;
+      }
+      let t: number;
+      try {
+        t = yt.getCurrentTime();
+      } catch {
+        raf = requestAnimationFrame(tick);
+        return;
+      }
+      setCurrentTime(t);
+      const { isLooping, loopStart, loopEnd } = beatLoopRef.current;
+      if (isLooping && loopEnd > 0 && loopStart < loopEnd && t >= loopEnd) {
+        yt.seekTo(loopStart, true);
+      }
+      syncMelodicDraftPlayback();
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      stopped = true;
+      cancelAnimationFrame(raf);
+    };
+  }, [useEmbedPlayer, isPlaying]);
+
   const togglePlay = async () => {
+    if (useEmbedPlayer) {
+      const yt = ytPlayerRef.current;
+      if (!yt || !ytApiReady) return;
+      try {
+        if (isPlaying) {
+          yt.pauseVideo();
+          pauseAllMelodicDrafts();
+          setIsPlaying(false);
+        } else {
+          yt.playVideo();
+          setIsPlaying(true);
+          syncMelodicDraftPlayback();
+        }
+      } catch {
+        setIsPlaying(false);
+        pauseAllMelodicDrafts();
+      }
+      return;
+    }
+
     const el = audioRef.current;
     if (!el) return;
     try {
@@ -1829,14 +2048,20 @@ export default function ImpactApp() {
                   )}
                   {useEmbedPlayer && beatYoutubeId && (
                     <div className="youtube-embed-wrap">
-                      <iframe
+                      <div
+                        ref={ytMountRef}
+                        className="youtube-api-mount"
                         title="YouTube beat"
-                        src={`https://www.youtube.com/embed/${beatYoutubeId}?playsinline=1&rel=0`}
-                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                        allowFullScreen
+                        style={{ width: '100%', minHeight: '180px', background: '#000', borderRadius: '12px' }}
                       />
+                      {!ytApiReady && (
+                        <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
+                          Loading YouTube player…
+                        </p>
+                      )}
                       <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
-                        Playback here uses YouTube&rsquo;s player (tap play inside the frame). Built-in loop controls only affect the separate audio stream when your browser can play it.
+                        Beat plays in YouTube&rsquo;s player. The app uses the same timeline for loops, the transport bar, and melodic
+                        drafts.
                       </p>
                     </div>
                   )}
@@ -1872,8 +2097,10 @@ export default function ImpactApp() {
                     <button
                       type="button"
                       className="btn btn-icon-only"
-                      onClick={togglePlay}
-                      disabled={!playerUrl || useEmbedPlayer || playerLoading}
+                      onClick={() => void togglePlay()}
+                      disabled={
+                        playerLoading || (useEmbedPlayer ? !ytApiReady || !beatYoutubeId : !playerUrl)
+                      }
                     >
                       {isPlaying ? <Pause size={20} /> : <Play size={20} />}
                     </button>
@@ -1881,11 +2108,19 @@ export default function ImpactApp() {
                       <div
                         className="progress-bar"
                         onPointerDown={(e) => {
-                          if (!audioRef.current || !duration || useEmbedPlayer) return;
+                          if (!duration) return;
                           const el = e.currentTarget;
                           const rect = el.getBoundingClientRect();
-                          const pos = (e.clientX - rect.left) / rect.width;
-                          audioRef.current.currentTime = Math.min(1, Math.max(0, pos)) * duration;
+                          const pos = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+                          const next = pos * duration;
+                          if (useEmbedPlayer && ytPlayerRef.current) {
+                            ytPlayerRef.current.seekTo(next, true);
+                            setCurrentTime(next);
+                            syncMelodicDraftPlayback();
+                            return;
+                          }
+                          if (!audioRef.current) return;
+                          audioRef.current.currentTime = next;
                         }}
                         role="presentation"
                       >
@@ -1967,7 +2202,7 @@ export default function ImpactApp() {
                     </h4>
                     <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: '0 0 0.75rem' }}>
                       Record a vocal while the beat plays; playback lines it up with the same spot on the timeline. Works with the
-                      streamed player above, not the YouTube-only embed.
+                      streamed player or the YouTube player once it has loaded.
                     </p>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center', marginBottom: '0.75rem' }}>
                       {draftRecording ? (
@@ -1979,7 +2214,13 @@ export default function ImpactApp() {
                           type="button"
                           className="btn-secondary"
                           onClick={() => void startMelodicDraftRecording()}
-                          disabled={!playerUrl || useEmbedPlayer || playerLoading}
+                          disabled={
+                            playerLoading ||
+                            (!(
+                              (playerUrl && !useEmbedPlayer) ||
+                              (useEmbedPlayer && beatYoutubeId && ytApiReady)
+                            ))
+                          }
                         >
                           <Mic size={16} /> Record draft
                         </button>
