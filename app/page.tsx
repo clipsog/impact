@@ -43,6 +43,7 @@ import {
   GripVertical,
   Mic,
   Square,
+  Headphones,
 } from 'lucide-react';
 import {
   type Theme,
@@ -311,6 +312,9 @@ export default function ImpactApp() {
   const draftRecordMaxTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const projectIdRef = useRef<string | null>(null);
   const [draftRecording, setDraftRecording] = useState(false);
+  const [soloDraftPlayingId, setSoloDraftPlayingId] = useState<string | null>(null);
+  const soloDraftPlayingIdRef = useRef<string | null>(null);
+  soloDraftPlayingIdRef.current = soloDraftPlayingId;
   projectIdRef.current = currentProject?.id ?? null;
 
   const playerUrlRef = useRef<string | null>(null);
@@ -600,6 +604,7 @@ export default function ImpactApp() {
 
     for (const d of drafts) {
       if (!d.audioDataUrl || d.duration <= 0) continue;
+      if (soloDraftPlayingIdRef.current === d.id) continue;
       const el = draftAudioRefs.current.get(d.id);
       if (!el) continue;
       const local = t - d.startTime;
@@ -680,8 +685,67 @@ export default function ImpactApp() {
     }
   };
 
+  const stopSoloDraftPreview = () => {
+    const id = soloDraftPlayingIdRef.current;
+    if (id) {
+      const el = draftAudioRefs.current.get(id);
+      if (el) {
+        el.pause();
+        el.currentTime = 0;
+        el.onended = null;
+      }
+    }
+    setSoloDraftPlayingId(null);
+  };
+
+  const playDraftWithBeat = (d: MelodicDraft) => {
+    stopSoloDraftPreview();
+    if (useEmbedPlayer && ytPlayerRef.current && ytApiReady && beatYoutubeId) {
+      ytPlayerRef.current.seekTo(Math.max(0, d.startTime), true);
+      ytPlayerRef.current.playVideo();
+      setIsPlaying(true);
+      return;
+    }
+    if (playerUrl && !useEmbedPlayer && audioRef.current) {
+      audioRef.current.currentTime = Math.max(0, d.startTime);
+      void audioRef.current.play().then(() => {
+        setIsPlaying(true);
+        syncMelodicDraftPlayback();
+      });
+      return;
+    }
+    window.alert('Load the beat first, then use Play with beat.');
+  };
+
+  const toggleSoloDraftPreview = (draftId: string) => {
+    if (soloDraftPlayingIdRef.current === draftId) {
+      stopSoloDraftPreview();
+      return;
+    }
+    stopSoloDraftPreview();
+    if (useEmbedPlayer && ytPlayerRef.current) {
+      ytPlayerRef.current.pauseVideo();
+      setIsPlaying(false);
+    } else if (audioRef.current && !audioRef.current.paused) {
+      audioRef.current.pause();
+      setIsPlaying(false);
+    }
+    pauseAllMelodicDrafts();
+    const el = draftAudioRefs.current.get(draftId);
+    if (!el) return;
+    el.currentTime = 0;
+    el.onended = () => {
+      stopSoloDraftPreview();
+    };
+    setSoloDraftPlayingId(draftId);
+    void el.play().catch(() => {
+      stopSoloDraftPreview();
+    });
+  };
+
   const startMelodicDraftRecording = async () => {
     if (draftRecording) return;
+    stopSoloDraftPreview();
     if (playerLoading) return;
     const canStream = Boolean(playerUrl && !useEmbedPlayer && audioRef.current);
     const canEmbed = Boolean(useEmbedPlayer && beatYoutubeId && ytApiReady && ytPlayerRef.current);
@@ -734,6 +798,7 @@ export default function ImpactApp() {
 
   const deleteMelodicDraft = (draftId: string) => {
     if (!currentProject) return;
+    if (soloDraftPlayingIdRef.current === draftId) stopSoloDraftPreview();
     const el = draftAudioRefs.current.get(draftId);
     if (el) {
       el.pause();
@@ -818,6 +883,7 @@ export default function ImpactApp() {
             if (cancelled) return;
             const st = e.data;
             if (st === YT_STATE_PLAYING) {
+              stopSoloDraftPreview();
               setIsPlaying(true);
               syncMelodicDraftPlayback();
             } else if (st === YT_STATE_PAUSED || st === YT_STATE_ENDED) {
@@ -895,6 +961,7 @@ export default function ImpactApp() {
           pauseAllMelodicDrafts();
           setIsPlaying(false);
         } else {
+          stopSoloDraftPreview();
           yt.playVideo();
           setIsPlaying(true);
           syncMelodicDraftPlayback();
@@ -914,6 +981,7 @@ export default function ImpactApp() {
         pauseAllMelodicDrafts();
         setIsPlaying(false);
       } else {
+        stopSoloDraftPreview();
         await el.play();
         setIsPlaying(true);
         syncMelodicDraftPlayback();
@@ -2074,6 +2142,7 @@ export default function ImpactApp() {
                       onTimeUpdate={handleTimeUpdate}
                       onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
                       onPlay={() => {
+                        stopSoloDraftPreview();
                         setIsPlaying(true);
                         syncMelodicDraftPlayback();
                       }}
@@ -2109,6 +2178,7 @@ export default function ImpactApp() {
                         className="progress-bar"
                         onPointerDown={(e) => {
                           if (!duration) return;
+                          stopSoloDraftPreview();
                           const el = e.currentTarget;
                           const rect = el.getBoundingClientRect();
                           const pos = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
@@ -2201,8 +2271,8 @@ export default function ImpactApp() {
                       <Mic size={18} color="var(--accent-color)" /> Melodic drafts
                     </h4>
                     <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: '0 0 0.75rem' }}>
-                      Record a vocal while the beat plays; playback lines it up with the same spot on the timeline. Works with the
-                      streamed player or the YouTube player once it has loaded.
+                      Record a vocal while the beat plays; playback lines it up with the same spot on the timeline. Each row has
+                      Play (with beat) and Solo (vocals only); starting the beat or scrubbing stops a solo preview.
                     </p>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center', marginBottom: '0.75rem' }}>
                       {draftRecording ? (
@@ -2258,7 +2328,34 @@ export default function ImpactApp() {
                             <button
                               type="button"
                               className="btn-secondary btn-icon-only"
+                              title="Play from this moment with the beat"
+                              aria-label="Play draft with beat"
+                              onClick={() => playDraftWithBeat(d)}
+                              disabled={
+                                playerLoading ||
+                                (useEmbedPlayer ? !ytApiReady || !beatYoutubeId : !playerUrl)
+                              }
+                            >
+                              <Play size={16} />
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-secondary btn-icon-only"
+                              title={
+                                soloDraftPlayingId === d.id ? 'Stop vocal-only preview' : 'Hear this take only (vocals)'
+                              }
+                              aria-label={
+                                soloDraftPlayingId === d.id ? 'Stop solo preview' : 'Play draft solo'
+                              }
+                              onClick={() => toggleSoloDraftPreview(d.id)}
+                            >
+                              {soloDraftPlayingId === d.id ? <Pause size={16} /> : <Headphones size={16} />}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-secondary btn-icon-only"
                               title="Delete draft"
+                              aria-label="Delete draft"
                               onClick={() => deleteMelodicDraft(d.id)}
                               style={{ color: 'var(--danger)' }}
                             >
