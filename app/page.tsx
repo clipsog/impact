@@ -41,6 +41,8 @@ import {
   ChevronUp,
   Pencil,
   GripVertical,
+  Mic,
+  Square,
 } from 'lucide-react';
 import {
   type Theme,
@@ -67,6 +69,19 @@ type Bar = {
 type Album = { id: string; name: string };
 type SongSection = { id: string; name: string };
 
+/** Voice memo aligned to the beat timeline (seconds); playback layers on the instrumental. */
+export type MelodicDraft = {
+  id: string;
+  /** Beat `currentTime` when recording started */
+  startTime: number;
+  /** Recording length in seconds */
+  duration: number;
+  /** `data:audio/...;base64,...` for persistence */
+  audioDataUrl: string;
+  label: string;
+  createdAt: number;
+};
+
 type Project = {
   id: string;
   title: string;
@@ -80,6 +95,7 @@ type Project = {
   goalIds: string[];
   genre: string;
   sections: SongSection[];
+  melodicDrafts: MelodicDraft[];
 };
 
 function migrateBar(raw: Record<string, unknown>): Bar {
@@ -114,6 +130,16 @@ function migrateProject(raw: Record<string, unknown>): Project {
       ? (raw.sections as Record<string, unknown>[]).map((s) => ({
           id: String(s.id),
           name: String(s.name ?? 'Section'),
+        }))
+      : [],
+    melodicDrafts: Array.isArray(raw.melodicDrafts)
+      ? (raw.melodicDrafts as Record<string, unknown>[]).map((d) => ({
+          id: String(d.id),
+          startTime: Number(d.startTime) || 0,
+          duration: Number(d.duration) || 0,
+          audioDataUrl: String(d.audioDataUrl ?? ''),
+          label: String(d.label ?? ''),
+          createdAt: Number(d.createdAt) || Date.now(),
         }))
       : [],
   };
@@ -268,6 +294,17 @@ export default function ImpactApp() {
   const [useEmbedPlayer, setUseEmbedPlayer] = useState(false);
   const [beatStreamError, setBeatStreamError] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  /** One `<audio>` per draft for timeline-synced playback over the beat */
+  const draftAudioRefs = useRef<Map<string, HTMLAudioElement>>(new Map());
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const recordChunksRef = useRef<Blob[]>([]);
+  const recordStartBeatRef = useRef(0);
+  const recordStartWallRef = useRef(0);
+  const draftRecordMaxTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const projectIdRef = useRef<string | null>(null);
+  const [draftRecording, setDraftRecording] = useState(false);
+  projectIdRef.current = currentProject?.id ?? null;
 
   const [songsGroupBy, setSongsGroupBy] = useState<'album' | 'goal' | 'genre'>('album');
   const [hydrated, setHydrated] = useState(false);
@@ -447,19 +484,224 @@ export default function ImpactApp() {
     return () => ac.abort();
   }, [currentProject?.youtubeUrl]);
 
+  useEffect(() => {
+    const drafts = currentProject?.melodicDrafts ?? [];
+    const map = draftAudioRefs.current;
+    for (const [id, el] of [...map.entries()]) {
+      if (!drafts.some((d) => d.id === id)) {
+        el.pause();
+        el.removeAttribute('src');
+        el.load();
+        map.delete(id);
+      }
+    }
+    for (const d of drafts) {
+      if (!d.audioDataUrl) continue;
+      let el = map.get(d.id);
+      if (!el) {
+        el = document.createElement('audio');
+        el.preload = 'auto';
+        map.set(d.id, el);
+      }
+      if (el.src !== d.audioDataUrl) {
+        el.src = d.audioDataUrl;
+      }
+    }
+  }, [currentProject?.id, currentProject?.melodicDrafts]);
+
+  useEffect(() => {
+    return () => {
+      if (draftRecordMaxTimerRef.current) {
+        clearTimeout(draftRecordMaxTimerRef.current);
+        draftRecordMaxTimerRef.current = null;
+      }
+      const mr = mediaRecorderRef.current;
+      if (mr && mr.state !== 'inactive') {
+        try {
+          mr.stop();
+        } catch {
+          /* ignore */
+        }
+      }
+      mediaRecorderRef.current = null;
+      micStreamRef.current?.getTracks().forEach((t) => t.stop());
+      micStreamRef.current = null;
+      setDraftRecording(false);
+    };
+  }, [currentProject?.id]);
+
+  const pauseAllMelodicDrafts = () => {
+    draftAudioRefs.current.forEach((el) => {
+      el.pause();
+    });
+  };
+
+  const syncMelodicDraftPlayback = () => {
+    const beat = audioRef.current;
+    const drafts = currentProject?.melodicDrafts ?? [];
+    if (!beat || beat.paused || !playerUrl || useEmbedPlayer) {
+      pauseAllMelodicDrafts();
+      return;
+    }
+    const t = beat.currentTime;
+    for (const d of drafts) {
+      if (!d.audioDataUrl || d.duration <= 0) continue;
+      const el = draftAudioRefs.current.get(d.id);
+      if (!el) continue;
+      const local = t - d.startTime;
+      if (local >= 0 && local < d.duration - 0.03) {
+        if (Math.abs(el.currentTime - local) > 0.25) el.currentTime = Math.max(0, local);
+        el.play().catch(() => {});
+      } else {
+        el.pause();
+        el.currentTime = Math.min(Math.max(0, local), Math.max(0.01, d.duration - 0.01));
+      }
+    }
+  };
+
+  const stopMelodicDraftRecording = () => {
+    if (draftRecordMaxTimerRef.current) {
+      clearTimeout(draftRecordMaxTimerRef.current);
+      draftRecordMaxTimerRef.current = null;
+    }
+    const mr = mediaRecorderRef.current;
+    micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    micStreamRef.current = null;
+    if (!mr || mr.state === 'inactive') {
+      mediaRecorderRef.current = null;
+      setDraftRecording(false);
+      return;
+    }
+    mr.onstop = () => {
+      mediaRecorderRef.current = null;
+      setDraftRecording(false);
+      const chunks = recordChunksRef.current;
+      recordChunksRef.current = [];
+      const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const dataUrl = reader.result as string;
+        const dur = Math.max(0.15, (performance.now() - recordStartWallRef.current) / 1000);
+        const pid = projectIdRef.current;
+        const st = recordStartBeatRef.current;
+        if (!pid || !dataUrl) return;
+        const draftId = uuidv4();
+        const createdAt = Date.now();
+        setProjects((prev) => {
+          const p = prev.find((x) => x.id === pid);
+          if (!p) return prev;
+          const draft: MelodicDraft = {
+            id: draftId,
+            startTime: st,
+            duration: dur,
+            audioDataUrl: dataUrl,
+            label: `Draft ${p.melodicDrafts.length + 1}`,
+            createdAt,
+          };
+          return prev.map((x) =>
+            x.id === pid ? { ...p, melodicDrafts: [...p.melodicDrafts, draft], updatedAt: Date.now() } : x
+          );
+        });
+        setCurrentProject((cp) => {
+          if (!cp || cp.id !== pid) return cp;
+          if (cp.melodicDrafts.some((x) => x.id === draftId)) return cp;
+          const draft: MelodicDraft = {
+            id: draftId,
+            startTime: st,
+            duration: dur,
+            audioDataUrl: dataUrl,
+            label: `Draft ${cp.melodicDrafts.length + 1}`,
+            createdAt,
+          };
+          return { ...cp, melodicDrafts: [...cp.melodicDrafts, draft], updatedAt: Date.now() };
+        });
+      };
+      reader.readAsDataURL(blob);
+    };
+    try {
+      mr.stop();
+    } catch {
+      setDraftRecording(false);
+      mediaRecorderRef.current = null;
+    }
+  };
+
+  const startMelodicDraftRecording = async () => {
+    if (draftRecording) return;
+    if (!playerUrl || useEmbedPlayer || !audioRef.current) {
+      window.alert(
+        'Melodic drafts need the streamed instrumental in this player (not YouTube embed-only). Use a normal watch URL until audio loads here, then record.'
+      );
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = stream;
+      const mime =
+        typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+          ? 'audio/webm;codecs=opus'
+          : typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported('audio/webm')
+            ? 'audio/webm'
+            : '';
+      const mr = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      mediaRecorderRef.current = mr;
+      recordChunksRef.current = [];
+      recordStartBeatRef.current = audioRef.current.currentTime;
+      recordStartWallRef.current = performance.now();
+      mr.ondataavailable = (e) => {
+        if (e.data.size) recordChunksRef.current.push(e.data);
+      };
+      mr.start(250);
+      setDraftRecording(true);
+      draftRecordMaxTimerRef.current = setTimeout(() => {
+        draftRecordMaxTimerRef.current = null;
+        stopMelodicDraftRecording();
+      }, 3 * 60 * 1000);
+    } catch {
+      window.alert('Microphone access was denied or is unavailable.');
+      micStreamRef.current?.getTracks().forEach((t) => t.stop());
+      micStreamRef.current = null;
+      setDraftRecording(false);
+    }
+  };
+
+  const deleteMelodicDraft = (draftId: string) => {
+    if (!currentProject) return;
+    const el = draftAudioRefs.current.get(draftId);
+    if (el) {
+      el.pause();
+      el.removeAttribute('src');
+      el.load();
+      draftAudioRefs.current.delete(draftId);
+    }
+    updateCurrentProject({
+      melodicDrafts: currentProject.melodicDrafts.filter((d) => d.id !== draftId),
+    });
+  };
+
+  const patchMelodicDraft = (draftId: string, patch: Partial<MelodicDraft>) => {
+    if (!currentProject) return;
+    updateCurrentProject({
+      melodicDrafts: currentProject.melodicDrafts.map((d) => (d.id === draftId ? { ...d, ...patch } : d)),
+    });
+  };
+
   const togglePlay = async () => {
     const el = audioRef.current;
     if (!el) return;
     try {
       if (isPlaying) {
         el.pause();
+        pauseAllMelodicDrafts();
         setIsPlaying(false);
       } else {
         await el.play();
         setIsPlaying(true);
+        syncMelodicDraftPlayback();
       }
     } catch {
       setIsPlaying(false);
+      pauseAllMelodicDrafts();
       if (beatYoutubeId) {
         setUseEmbedPlayer(true);
       }
@@ -475,6 +717,7 @@ export default function ImpactApp() {
           audioRef.current.currentTime = currentProject.loopStart;
         }
       }
+      syncMelodicDraftPlayback();
     }
   };
 
@@ -500,6 +743,7 @@ export default function ImpactApp() {
       goalIds: [],
       genre: '',
       sections: [],
+      melodicDrafts: [],
     };
     setProjects([newProject, ...projects]);
     setCurrentProject(newProject);
@@ -1604,9 +1848,22 @@ export default function ImpactApp() {
                       preload="metadata"
                       onTimeUpdate={handleTimeUpdate}
                       onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-                      onEnded={() => setIsPlaying(false)}
+                      onPlay={() => {
+                        setIsPlaying(true);
+                        syncMelodicDraftPlayback();
+                      }}
+                      onPause={() => {
+                        setIsPlaying(false);
+                        pauseAllMelodicDrafts();
+                      }}
+                      onSeeked={syncMelodicDraftPlayback}
+                      onEnded={() => {
+                        setIsPlaying(false);
+                        pauseAllMelodicDrafts();
+                      }}
                       onError={() => {
                         setIsPlaying(false);
+                        pauseAllMelodicDrafts();
                         if (beatYoutubeId) setUseEmbedPlayer(true);
                       }}
                     />
@@ -1703,6 +1960,73 @@ export default function ImpactApp() {
                         Set Loop Range
                       </button>
                     </div>
+                  </div>
+                  <div className="melodic-drafts glass" style={{ marginTop: '1rem', padding: '1rem' }}>
+                    <h4 style={{ margin: '0 0 0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1rem' }}>
+                      <Mic size={18} color="var(--accent-color)" /> Melodic drafts
+                    </h4>
+                    <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: '0 0 0.75rem' }}>
+                      Record a vocal while the beat plays; playback lines it up with the same spot on the timeline. Works with the
+                      streamed player above, not the YouTube-only embed.
+                    </p>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center', marginBottom: '0.75rem' }}>
+                      {draftRecording ? (
+                        <button type="button" className="btn" onClick={stopMelodicDraftRecording}>
+                          <Square size={16} /> Stop recording
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          onClick={() => void startMelodicDraftRecording()}
+                          disabled={!playerUrl || useEmbedPlayer || playerLoading}
+                        >
+                          <Mic size={16} /> Record draft
+                        </button>
+                      )}
+                      {draftRecording && (
+                        <span style={{ fontSize: '0.85rem', color: 'var(--accent-secondary)' }}>Recording…</span>
+                      )}
+                    </div>
+                    {(currentProject.melodicDrafts ?? []).length === 0 ? (
+                      <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: 0 }}>No drafts yet.</p>
+                    ) : (
+                      <ul className="melodic-drafts-list" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+                        {currentProject.melodicDrafts.map((d) => (
+                          <li
+                            key={d.id}
+                            style={{
+                              display: 'flex',
+                              flexWrap: 'wrap',
+                              gap: '0.5rem',
+                              alignItems: 'center',
+                              padding: '0.5rem 0',
+                              borderTop: '1px solid rgba(255,255,255,0.06)',
+                            }}
+                          >
+                            <input
+                              value={d.label}
+                              onChange={(e) => patchMelodicDraft(d.id, { label: e.target.value })}
+                              style={{ flex: '1 1 140px', minWidth: '120px', padding: '0.35rem 0.5rem' }}
+                              aria-label="Draft label"
+                            />
+                            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                              @ {Math.floor(d.startTime / 60)}:{Math.floor(d.startTime % 60).toString().padStart(2, '0')} ·{' '}
+                              {d.duration.toFixed(1)}s
+                            </span>
+                            <button
+                              type="button"
+                              className="btn-secondary btn-icon-only"
+                              title="Delete draft"
+                              onClick={() => deleteMelodicDraft(d.id)}
+                              style={{ color: 'var(--danger)' }}
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </div>
                 </div>
               )}
